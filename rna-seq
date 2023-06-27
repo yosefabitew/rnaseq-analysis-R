@@ -1,0 +1,130 @@
+setwd("Z:/FBNProjectGroups/I3-NGS-PFOWL/2nd_phase/RNA-seq_data/nfcore_rnaseq_yosef/hisat2/HTSeq")
+directory <- "Z:/FBNProjectGroups/I3-NGS-PFOWL/2nd_phase/RNA-seq_data/nfcore_rnaseq_yosef/hisat2/HTSeq"
+tissue=c("JejM");outlier= "none";trial="2a";outputPrefix <- "RNAseq_DESeq2"
+
+#-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+if (!require("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+
+BiocManager::install(c("sva",'RUVSeq' ))
+
+library(sva);library(RUVSeq);
+library(dplyr);library(pander);library(DESeq2);library(apeglm);library(qvalue);library(ggplot2);
+library(genefilter);library(RColorBrewer);library(ReportingTools);library(variancePartition);
+library(pheatmap);library(PoiClaClu);library(reshape2); library(readxl); library(arrayQualityMetrics)
+
+y <- readRDS('counts.rds')
+pheno_ready <- read.csv('pheno_ready.csv')
+pheno_ready$diet <- gsub('-', 'low', pheno_ready$diet)
+pheno_ready$diet <- gsub('\\+', 'high', pheno_ready$diet)
+pheno_ready$X <- NULL
+rownames(pheno_ready) <- pheno_ready$ID
+pheno_ready[sapply(pheno_ready, is.character)] <- lapply(pheno_ready[sapply(pheno_ready, is.character)], 
+                                                         as.factor)
+pheno_ready[sapply(pheno_ready, is.numeric)] <- lapply(pheno_ready[sapply(pheno_ready, is.numeric)], 
+                                                       as.factor)
+
+
+dds = DESeqDataSetFromMatrix(countData = y, colData = pheno_ready,
+                             design = ~ period + strain + diet)
+
+
+keep <- rowSums(counts(dds) >= 10) >= 5
+dds <- dds[keep,]
+
+#------------extract the count matrix from DESeq2 object-----------------------------------------------------------------------------------------------------------------
+dds<-estimateSizeFactors(dds) 
+countMatrix<-counts(dds, normalized = TRUE)
+
+
+
+
+#-----------Remove residual variances using RUVr--------------------------------------------------------------------------------------------------------------------------
+ruv_object <- RUVSeq(countMatrix, batch = pheno_ready$slaughter_date)
+
+ruvrObj <- RUVr(countMatrix)
+
+
+#------------identify unwanted batch effects using svaseq------------------------------------------------------------------------------------------------------------------
+n.sv = num.sv(countMatrix,mod, method = 'leek')
+n.sv
+
+svaobj = sva(countMatrix,mod)
+surrogateVariables <- svaobj$sv
+
+
+
+#-----------Update the design formula in DESeq2 to include the surrogate variable----------------------------------------------------------------------------------------
+
+
+
+mod
+mod <- model.matrix( ~ period + strain + diet, data = pheno_ready)
+mod0 <- model.matrix( ~ 1, data = pheno_ready)
+svaSeqObj <- svaseq(countMatrix, mod, mod0, n.sv = 2)$sv
+plot(svaSeqObj, pch=19, col='blue')
+
+svaSeqObj <- as.data.frame(svaSeqObj)
+colData(dds)$BV1 <- svaSeqObj$V1
+colData(dds)$BV2 <- svaSeqObj$V2
+svaSeqObj
+
+design(dds) <- ~BV1 + BV2 + period + strain + diet
+
+test = 'Wald'
+if (test=="Wald") {
+  data_deseq_test = DESeq(dds, test=test, fitType="local") #local, mean, parametic
+} else {
+  data_deseq_test = DESeq(dds, test=test, fitType="mean",reduced = as.formula(~1))
+}
+  
+#-------------------------------------------------1 Strain effect LB VS LSL--------------------------------------------------------------------------------------------------
+
+  res = results(data_deseq_test, cooksCutoff = 0.99, contrast = c('strain', 'LB', 'LSL'))
+  
+  summary(res)
+  res_tax = cbind(as.data.frame(res), as.matrix(y[rownames(res), ]), OTU = rownames(res))
+  res_tax<-res_tax[order(res_tax$padj),]
+  if (test=="Wald") {
+    contr<-gsub("^.*ic: ","",res@elementMetadata$description[4]) 
+  } else {contr<-gsub("^.*or: ","",res@elementMetadata$description[3])}
+  contr<-gsub(" vs ","-",contr)
+  write.csv(res_tax, "Norm_Batch_effect_Full_model_strain_effects_LBvsLSL_keep10_5.csv")
+  
+  cat(contr,": p<0.05=",dim(subset(res_tax,res_tax$pvalue<0.05))[1],"\n");cat(contr,": q<0.05=",dim(subset(res_tax,res_tax$padj <0.05))[1],"\n")
+  cat(summary(res))
+  
+  #--------------------------------------------2 Diet effect Phigh vs Plow ----------------------------------------------------------------------------------------------------
+  
+  res2 = results(data_deseq_test, cooksCutoff = 0.99, contrast = c('diet', 'Phigh', 'Plow'))
+  
+  summary(res2)
+  res_tax2 = cbind(as.data.frame(res2), as.matrix(y[rownames(res2), ]), OTU = rownames(res2))
+  res_tax2<-res_tax2[order(res_tax2$padj),]
+  if (test=="Wald") {
+    contr<-gsub("^.*ic: ","",res2@elementMetadata$description[4]) 
+  } else {contr<-gsub("^.*or: ","",res2@elementMetadata$description[3])}
+  contr<-gsub(" vs ","-",contr)
+  write.csv(res_tax2, "Norm_Batch_effects_Full_model_diet_effects_PhighvsPlow_keep10_5.csv")
+  
+  cat(contr,": p<0.05=",dim(subset(res_tax2,res_tax2$pvalue<0.05))[1],"\n");cat(contr,": q<0.05=",dim(subset(res_tax2,res_tax2$padj <0.05))[1],"\n")
+  cat(summary(res2))
+  
+  #-----------------------------------------3 period effect 19 vs 24 ------------------------------------------------------------------------------------------------------------
+  
+  res3 = results(data_deseq_test, cooksCutoff = 0.99, contrast = c('period', '1', '2'))
+  
+  summary(res3)
+  res_tax3 = cbind(as.data.frame(res3), as.matrix(y[rownames(res3), ]), OTU = rownames(res3))
+  res_tax3 <- res_tax3[order(res_tax3$padj),]
+  if (test=="Wald") {
+    contr<-gsub("^.*ic: ","",res3@elementMetadata$description[4]) 
+  } else {contr<-gsub("^.*or: ","",res3@elementMetadata$description[3])}
+  contr<-gsub(" vs ","-",contr)
+  write.csv(res_tax3, "Norm_Batch_effects_Full_model_period_effects_1vs2_keep10_5.csv")
+  
+  cat(contr,": p<0.05=",dim(subset(res_tax3,res_tax3$pvalue<0.05))[1],"\n");cat(contr,": q<0.05=",dim(subset(res_tax3,res_tax3$padj <0.05))[1],"\n")
+  cat(summary(res3))
+  
+  #-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
